@@ -1,13 +1,12 @@
-# ui/file_viewer.py
-# This module defines a reusable dialog for displaying text files (Markdown or Plain Text) with support for external images. It uses a custom QTextBrowser to handle image loading. 
-# The BadgeCacheWorker runs in a background thread to download badge images and update the HTML content without freezing the UI.    
+# ui_files/file_viewer.py
 
 import re
 import urllib.request
 import sys
 import os
-from PySide6.QtWidgets import QDialog, QVBoxLayout, QTextBrowser, QPushButton
-from PySide6.QtCore import Qt, QUrl, QThread, Signal
+from PySide6.QtWidgets import QDialog, QVBoxLayout
+from PySide6.QtCore import Qt, QUrl, QThread, Signal, QFile
+from PySide6.QtUiTools import QUiLoader
 from pathlib import Path
 
 
@@ -17,7 +16,7 @@ def get_resource_path(relative_path):
         # PyInstaller creates a temp folder and stores path in _MEIPASS
         base_path = sys._MEIPASS
     except Exception:
-        base_path = os.path.abspath(".")
+        base_path = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
     
     return os.path.join(base_path, relative_path)
 
@@ -31,19 +30,15 @@ class BadgeCacheWorker(QThread):
         self.html_content = html_content
 
     def run(self):
-        # FIX: Robust regex that finds src="url" NO MATTER the order of attributes
-        pattern = r'(<img\s[^>]*?)src="(https?://[^"]+)"'
+        pattern = r'(<img\s[^>]*?)src=[\'"](https?://[^\'"]+)[\'"]'
         
-        # Use local badges folder first (in resources/badges/)
         local_badges_dir = Path(get_resource_path("resources")) / "badges"
         cache_dir = Path(get_resource_path("resources")) / "badge_cache"
         
-        # Create directories if they don't exist
         local_badges_dir.mkdir(parents=True, exist_ok=True)
         cache_dir.mkdir(parents=True, exist_ok=True)
         
         def get_local_badge_path(url):
-            """Extract filename from URL and check local badges folder first"""
             filename = url.split("/")[-1]
             if '?' in filename:
                 filename = filename.split('?')[0]
@@ -51,32 +46,26 @@ class BadgeCacheWorker(QThread):
             if not filename.endswith('.svg') and not filename.endswith('.png'):
                 filename += '.svg'
             
-            # Check local badges folder first (shipped with app)
             local_path = local_badges_dir / filename
             if local_path.exists():
                 return local_path
             
-            # Check cache folder next (previously downloaded)
             cache_path = cache_dir / filename
             if cache_path.exists():
                 return cache_path
             
-            # Not found locally
             return None
         
         def download_and_replace(match):
             full_tag_start = match.group(1)
             url = match.group(2)
             
-            # Try to get local badge first
             local_path = get_local_badge_path(url)
             
             if local_path and local_path.exists():
-                # Use local badge (no download needed)
                 local_url = QUrl.fromLocalFile(str(local_path.absolute())).toString()
                 return f'{full_tag_start}src="{local_url}"'
             
-            # Not found locally, download it
             filename = url.split("/")[-1]
             if '?' in filename:
                 filename = filename.split('?')[0]
@@ -91,12 +80,10 @@ class BadgeCacheWorker(QThread):
                 with urllib.request.urlopen(req, timeout=5) as response:
                     with open(local_path, 'wb') as f:
                         f.write(response.read())
-                print(f"[Cache] Downloaded badge: {filename}")
                 local_url = QUrl.fromLocalFile(str(local_path.absolute())).toString()
                 return f'{full_tag_start}src="{local_url}"'
             except Exception as e:
-                print(f"[Cache] Failed to download {url} - Error: {e}")
-                return match.group(0)  # Keep original internet URL if it fails
+                return match.group(0)
 
         updated_html = re.sub(pattern, download_and_replace, self.html_content)
         self.finished.emit(updated_html)
@@ -107,23 +94,24 @@ class FileViewerDialog(QDialog):
     
     def __init__(self, title: str, file_names: list, is_markdown: bool = False, size: tuple = (600, 450), parent=None):
         super().__init__(parent)
+        
+        loader = QUiLoader()
+        ui_file_path = os.path.join(os.path.dirname(__file__), "..", "ui", "file_viewer.ui")
+        ui_file = QFile(ui_file_path)
+        ui_file.open(QFile.ReadOnly)
+        self.ui = loader.load(ui_file, self)
+        ui_file.close()
+        
         self.setWindowTitle(title)
         self.resize(size[0], size[1])  
         self.setModal(True)
         
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(15, 15, 15, 15)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.addWidget(self.ui)
         
-        self.text_browser = QTextBrowser()
-        self.text_browser.setOpenExternalLinks(True) 
-        
-        self.load_file(file_names, is_markdown)
-        layout.addWidget(self.text_browser)
-        
-        # Close button
-        close_btn = QPushButton("Close")
-        close_btn.setFixedWidth(100)
-        close_btn.setStyleSheet("""
+        self.ui.close_btn.clicked.connect(self.accept)
+        self.ui.close_btn.setStyleSheet("""
             QPushButton {
                 background-color: #0078d4;
                 color: white;
@@ -136,8 +124,8 @@ class FileViewerDialog(QDialog):
                 background-color: #106ebe;
             }
         """)
-        close_btn.clicked.connect(self.accept)
-        layout.addWidget(close_btn, alignment=Qt.AlignmentFlag.AlignCenter)
+        
+        self.load_file(file_names, is_markdown)
     
     def load_file(self, possible_names: list, is_markdown: bool):
         base_dir = Path(get_resource_path("."))
@@ -153,7 +141,7 @@ class FileViewerDialog(QDialog):
                     content = f"<i>Error reading file: {name}</i>"
                     
         if is_markdown:
-            self.text_browser.setStyleSheet("""
+            self.ui.text_browser.setStyleSheet("""
                 QTextBrowser {
                     background-color: #FFFFFF;
                     color: #333333;
@@ -167,16 +155,14 @@ class FileViewerDialog(QDialog):
             import markdown
             html = markdown.markdown(content, extensions=['extra', 'fenced_code', 'codehilite'])
             
-            # 1. Show text IMMEDIATELY (no hang). Badges will just be blank for a microsecond.
-            self.text_browser.setHtml(html)
+            self.ui.text_browser.setHtml(html)
             
-            # 2. Start background thread to check local badges and download if needed
             self.cache_worker = BadgeCacheWorker(html)
             self.cache_worker.finished.connect(self.on_badges_cached)
             self.cache_worker.start()
             
         else:
-            self.text_browser.setStyleSheet("""
+            self.ui.text_browser.setStyleSheet("""
                 QTextBrowser {
                     background-color: #F5F5F5;
                     color: #333333;
@@ -187,16 +173,9 @@ class FileViewerDialog(QDialog):
                     font-size: 12px;
                 }
             """)
-            self.text_browser.setPlainText(content)
+            self.ui.text_browser.setPlainText(content)
 
     def on_badges_cached(self, updated_html: str):
-        """Slot called by the background thread when downloads are complete"""
-        # Preserve the user's scroll position so it doesn't jump to the top
-        scroll_pos = self.text_browser.verticalScrollBar().value()
-        
-        # Inject the HTML with the local image paths
-        self.text_browser.setHtml(updated_html)
-        
-        # Restore scroll position
-        self.text_browser.verticalScrollBar().setValue(scroll_pos)
-        
+        scroll_pos = self.ui.text_browser.verticalScrollBar().value()
+        self.ui.text_browser.setHtml(updated_html)
+        self.ui.text_browser.verticalScrollBar().setValue(scroll_pos)

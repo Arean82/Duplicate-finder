@@ -4,7 +4,7 @@ JSON Duplicate Finder - Main Entry Point
 Run this file to start the application
 """
 
-from application.frontend import main
+from application.ui_files.frontend import main
 
 if __name__ == "__main__":
     main()

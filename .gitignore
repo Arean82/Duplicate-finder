@@ -1,2 +1,5 @@
 /.ruby-lsp
 /1.txt
+build/*
+dist/*
+application/__pycache__/*
