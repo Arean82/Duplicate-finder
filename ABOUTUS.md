@@ -1,6 +1,6 @@
 # About JSON Duplicate Finder
 
-[![Version](https://img.shields.io/badge/version-1.0.0-blue.svg)](https://github.com/yourusername/json-duplicate-finder)
+[![Version](https://img.shields.io/badge/version-1.0.0-blue.svg)](https://github.com/Arean82/json-duplicate-finder)
 [![Python](https://img.shields.io/badge/python-3.7+-yellow.svg)](https://www.python.org/)
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 
@@ -25,7 +25,7 @@ Perfect for managing large video collections and identifying redundant entries.
 - 🎯 **Smart Filtering** - Toggle between showing all entries or only duplicates
 - 💾 **Export Reports** - Save duplicate reports to text files
 - 🎨 **Color Coding** - Visual indicators for duplicate severity
-- ⚡ **Fast Performance** - Background threading prevents UI freezing
+- ⚡ **Fast Performance** - Background threading and SQLite WAL mode prevent UI freezing
 - ⌨️ **Keyboard Shortcuts** - Quick access to common functions
 
 ---
@@ -45,7 +45,7 @@ Perfect for managing large video collections and identifying redundant entries.
 
 1. **Load JSON Files** - Select one or multiple JSON files from any folder
 2. **Automatic Extraction** - The tool extracts video codes (format: `XXX-123`)
-3. **Duplicate Detection** - Compares codes across all loaded files
+3. **Duplicate Detection** - Compares codes across all loaded files using embedded SQLite storage
 4. **Visual Results** - View duplicates in color-coded tables
 5. **Export Reports** - Save findings for further processing
 
@@ -54,6 +54,7 @@ Perfect for managing large video collections and identifying redundant entries.
 ## 🛠️ Technologies Used
 
 - **PySide6** - Qt framework for Python
+- **SQLite3** - Fast local embedded database storage (WAL mode)
 - **Markdown** - For rendering documentation
 - **Python 3.7+** - Core programming language
 

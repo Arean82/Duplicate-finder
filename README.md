@@ -51,17 +51,19 @@ python run.py
 json-duplicate-finder/
 │
 ├── run.py                  # Entry point (run this file)
-├── requirements.txt        # Python dependencies
-├── aboutus.md              # About Us content (Help menu)
+├── requirements.txt        # Python dependencies (PySide6, markdown)
+├── ABOUTUS.md              # About Us content (Help menu)
 ├── README.md               # This documentation file
 ├── LICENSE                 # MIT License file
 ├── build.py                # PyInstaller build script
+├── duplicates.db           # SQLite database for caching entries
 │
 ├── application/            # Main application package
-│   ├── __init__.py         # Makes it a Python package (empty file)
-│   ├── backend.py          # Business logic and duplicate detection
-│   ├── frontend.py         # UI with menu bar and tabs
-│   └── file_viewer.py      # File viewer dialog for docs
+│   ├── __init__.py         # Makes it a Python package
+│   ├── backend.py          # Business logic, SQLite storage & duplicate detection
+│   └── ui_files/           # UI presentation layer
+│       ├── frontend.py     # Main window, menus, tables & worker thread
+│       └── file_viewer.py  # Markdown viewer dialog
 │
 └── resources/              # Created automatically
     ├── badges/             # Place your badge images here
@@ -199,6 +201,8 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 ## 🙏 Acknowledgments
 
 - Built with [PySide6](https://www.qt.io/qt-for-python) (Qt for Python)
+- Local embedded database powered by Python's built-in `sqlite3` (WAL mode)
+- Markdown rendered with Python-Markdown
 - Icons from Unicode emojis
 - Inspired by data deduplication needs
 
@@ -206,5 +210,5 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 
 **Made with ❤️ by Arean Narrayan**
 
-**Version 1.0.0** | **Last Updated: 2024**
+**Version 1.0.0** | **Last Updated: 2026**
 

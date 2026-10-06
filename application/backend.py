@@ -6,47 +6,49 @@ import re
 from collections import defaultdict
 from typing import Dict, List, Tuple
 import threading
-import libsql_client
+import sqlite3
 
 class DuplicateFinderBackend:
-    """Backend logic for finding duplicate video codes using Turso (libSQL)"""
+    """Backend logic for finding duplicate video codes using sqlite3"""
     
     def __init__(self):
-        # We will use a local SQLite file using libsql_client for embedded Turso compatibility
-        db_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "duplicates.db")
-        self.db_url = f"file:{db_path}"
-        self._init_db()
+        # We will use a local SQLite file
+        self.db_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "duplicates.db")
         self.lock = threading.Lock()
         self.key_pattern = r'.*?-.*\d.*'  # Default pattern: contains a dash and a digit
+        self._init_db()
     
+    def _get_connection(self) -> sqlite3.Connection:
+        conn = sqlite3.connect(self.db_path, timeout=30.0)
+        conn.execute("PRAGMA journal_mode=WAL")
+        return conn
+
     def set_key_pattern(self, pattern: str):
         """Update the regex pattern used to identify valid video codes"""
         self.key_pattern = pattern
         
     def _init_db(self):
-        client = libsql_client.create_client_sync(self.db_url)
-        client.execute('''
-            CREATE TABLE IF NOT EXISTS entries (
-                code TEXT,
-                filename TEXT,
-                size_mb REAL,
-                source_file TEXT,
-                full_path TEXT
-            )
-        ''')
-        client.execute('''
-            CREATE TABLE IF NOT EXISTS loaded_files (
-                full_path TEXT PRIMARY KEY
-            )
-        ''')
-        client.close()
+        with self._get_connection() as conn:
+            conn.execute('''
+                CREATE TABLE IF NOT EXISTS entries (
+                    code TEXT,
+                    filename TEXT,
+                    size_mb REAL,
+                    source_file TEXT,
+                    full_path TEXT
+                )
+            ''')
+            conn.execute('''
+                CREATE TABLE IF NOT EXISTS loaded_files (
+                    full_path TEXT PRIMARY KEY
+                )
+            ''')
 
     def get_loaded_files(self) -> List[str]:
-        client = libsql_client.create_client_sync(self.db_url)
-        rs = client.execute("SELECT full_path FROM loaded_files")
-        files = [str(row[0]) for row in rs.rows]
-        client.close()
-        return files
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT full_path FROM loaded_files")
+            return [str(row[0]) for row in cursor.fetchall()]
 
     @property
     def loaded_files(self):
@@ -64,14 +66,11 @@ class DuplicateFinderBackend:
         if not file_paths:
             return 0, []
             
-        client = libsql_client.create_client_sync(self.db_url)
-        try:
+        with self._get_connection() as conn:
             for file_path in file_paths:
-                entries, new_duplicates = self._load_single_file(client, file_path)
+                entries, new_duplicates = self._load_single_file(conn, file_path)
                 total_entries += entries
                 all_new_duplicates.extend(new_duplicates)
-        finally:
-            client.close()
             
         return total_entries, list(set(all_new_duplicates))
 
@@ -79,7 +78,7 @@ class DuplicateFinderBackend:
         # Map to sequential to avoid concurrent SQLite write locks
         return self.load_json_files(file_paths)
 
-    def _load_single_file(self, client, file_path: str) -> Tuple[int, List[str]]:
+    def _load_single_file(self, conn: sqlite3.Connection, file_path: str) -> Tuple[int, List[str]]:
         try:
             with open(file_path, 'r', encoding='utf-8') as f:
                 data = json.load(f)
@@ -94,29 +93,38 @@ class DuplicateFinderBackend:
         
         # Check existing codes to find new duplicates
         if entries:
-            # We batch select to avoid many queries
             codes = list(entries.keys())
-            # Sqlite has a limit on parameters, usually 999. Batch if necessary
             batch_size = 900
             existing_codes = set()
+            cursor = conn.cursor()
             for i in range(0, len(codes), batch_size):
                 batch_codes = codes[i:i+batch_size]
                 placeholders = ", ".join(["?"] * len(batch_codes))
-                rs = client.execute(f"SELECT DISTINCT code FROM entries WHERE code IN ({placeholders})", batch_codes)
-                existing_codes.update(str(row[0]) for row in rs.rows)
+                cursor.execute(f"SELECT DISTINCT code FROM entries WHERE code IN ({placeholders})", batch_codes)
+                existing_codes.update(str(row[0]) for row in cursor.fetchall())
                 
             for code in entries:
                 if code in existing_codes:
                     new_duplicates.append(code)
                     
-        # Insert
-        for code, info in entries.items():
-            client.execute(
-                "INSERT INTO entries (code, filename, size_mb, source_file, full_path) VALUES (?, ?, ?, ?, ?)",
-                [code, str(info.get('filename', 'Unknown')), float(info.get('size_mb', 0.0) if info.get('size_mb') else 0.0), filename, file_path]
+        # Insert entries in batch
+        insert_rows = [
+            (
+                code,
+                str(info.get('filename', 'Unknown')),
+                float(info.get('size_mb', 0.0) if info.get('size_mb') else 0.0),
+                filename,
+                file_path
             )
-            
-        client.execute("INSERT INTO loaded_files (full_path) VALUES (?)", [file_path])
+            for code, info in entries.items()
+        ]
+        
+        cursor = conn.cursor()
+        cursor.executemany(
+            "INSERT INTO entries (code, filename, size_mb, source_file, full_path) VALUES (?, ?, ?, ?, ?)",
+            insert_rows
+        )
+        cursor.execute("INSERT INTO loaded_files (full_path) VALUES (?)", (file_path,))
         return len(entries), new_duplicates
 
     def _extract_video_entries(self, data: Dict) -> Dict:
@@ -137,89 +145,88 @@ class DuplicateFinderBackend:
 
     def get_duplicates(self) -> Dict[str, List[Dict]]:
         """Get all duplicate codes"""
-        client = libsql_client.create_client_sync(self.db_url)
-        rs = client.execute("""
-            SELECT code FROM entries 
-            GROUP BY code HAVING COUNT(*) > 1
-        """)
-        duplicate_codes = [str(row[0]) for row in rs.rows]
-        
-        if not duplicate_codes:
-            client.close()
-            return {}
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("""
+                SELECT code FROM entries 
+                GROUP BY code HAVING COUNT(*) > 1
+            """)
+            duplicate_codes = [str(row[0]) for row in cursor.fetchall()]
             
-        duplicates = defaultdict(list)
-        batch_size = 900
-        for i in range(0, len(duplicate_codes), batch_size):
-            batch_codes = duplicate_codes[i:i+batch_size]
-            placeholders = ", ".join(["?"] * len(batch_codes))
-            rs = client.execute(f"""
-                SELECT code, filename, size_mb, source_file, full_path 
-                FROM entries WHERE code IN ({placeholders})
-            """, batch_codes)
-            
-            for row in rs.rows:
-                duplicates[str(row[0])].append({
+            if not duplicate_codes:
+                return {}
+                
+            duplicates = defaultdict(list)
+            batch_size = 900
+            for i in range(0, len(duplicate_codes), batch_size):
+                batch_codes = duplicate_codes[i:i+batch_size]
+                placeholders = ", ".join(["?"] * len(batch_codes))
+                cursor.execute(f"""
+                    SELECT code, filename, size_mb, source_file, full_path 
+                    FROM entries WHERE code IN ({placeholders})
+                """, batch_codes)
+                
+                for row in cursor.fetchall():
+                    duplicates[str(row[0])].append({
+                        'filename': str(row[1]),
+                        'size_mb': row[2],
+                        'source_file': str(row[3]),
+                        'full_path': str(row[4])
+                    })
+                
+            return dict(duplicates)
+
+    def get_all_entries(self) -> Dict[str, List[Dict]]:
+        """Get all loaded entries"""
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT code, filename, size_mb, source_file, full_path FROM entries")
+            entries = defaultdict(list)
+            for row in cursor.fetchall():
+                entries[str(row[0])].append({
                     'filename': str(row[1]),
                     'size_mb': row[2],
                     'source_file': str(row[3]),
                     'full_path': str(row[4])
                 })
-            
-        client.close()
-        return dict(duplicates)
-
-    def get_all_entries(self) -> Dict[str, List[Dict]]:
-        """Get all loaded entries"""
-        client = libsql_client.create_client_sync(self.db_url)
-        rs = client.execute("SELECT code, filename, size_mb, source_file, full_path FROM entries")
-        entries = defaultdict(list)
-        for row in rs.rows:
-            entries[str(row[0])].append({
-                'filename': str(row[1]),
-                'size_mb': row[2],
-                'source_file': str(row[3]),
-                'full_path': str(row[4])
-            })
-        client.close()
-        return dict(entries)
+            return dict(entries)
 
     def unload_file(self, file_path: str):
         """Unload a specific file from the database"""
-        client = libsql_client.create_client_sync(self.db_url)
-        client.execute("DELETE FROM entries WHERE full_path = ?", [file_path])
-        client.execute("DELETE FROM loaded_files WHERE full_path = ?", [file_path])
-        client.close()
+        with self._get_connection() as conn:
+            conn.execute("DELETE FROM entries WHERE full_path = ?", (file_path,))
+            conn.execute("DELETE FROM loaded_files WHERE full_path = ?", (file_path,))
 
     def get_summary(self) -> Dict:
         """Get summary information"""
-        client = libsql_client.create_client_sync(self.db_url)
-        files_rs = client.execute("SELECT COUNT(*) FROM loaded_files")
-        total_files = files_rs.rows[0][0]
-        
-        unique_rs = client.execute("SELECT COUNT(DISTINCT code) FROM entries")
-        total_unique = unique_rs.rows[0][0]
-        
-        dupes_rs = client.execute("SELECT COUNT(*) FROM (SELECT code FROM entries GROUP BY code HAVING COUNT(*) > 1)")
-        duplicate_codes = dupes_rs.rows[0][0]
-        
-        dupe_occur_rs = client.execute("""
-            SELECT SUM(cnt) FROM (
-                SELECT COUNT(*) as cnt FROM entries GROUP BY code HAVING COUNT(*) > 1
-            )
-        """)
-        total_duplicate_occurrences = dupe_occur_rs.rows[0][0] if dupe_occur_rs.rows and dupe_occur_rs.rows[0][0] else 0
-        
-        files_list = self.get_loaded_files()
-        client.close()
-        
-        return {
-            'total_files': total_files,
-            'total_unique_codes': total_unique,
-            'duplicate_codes': duplicate_codes,
-            'total_duplicate_occurrences': total_duplicate_occurrences,
-            'loaded_files': files_list
-        }
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT COUNT(*) FROM loaded_files")
+            total_files = cursor.fetchone()[0]
+            
+            cursor.execute("SELECT COUNT(DISTINCT code) FROM entries")
+            total_unique = cursor.fetchone()[0]
+            
+            cursor.execute("SELECT COUNT(*) FROM (SELECT code FROM entries GROUP BY code HAVING COUNT(*) > 1)")
+            duplicate_codes = cursor.fetchone()[0]
+            
+            cursor.execute("""
+                SELECT SUM(cnt) FROM (
+                    SELECT COUNT(*) as cnt FROM entries GROUP BY code HAVING COUNT(*) > 1
+                )
+            """)
+            row = cursor.fetchone()
+            total_duplicate_occurrences = row[0] if row and row[0] is not None else 0
+            
+            files_list = self.get_loaded_files()
+            
+            return {
+                'total_files': total_files,
+                'total_unique_codes': total_unique,
+                'duplicate_codes': duplicate_codes,
+                'total_duplicate_occurrences': total_duplicate_occurrences,
+                'loaded_files': files_list
+            }
 
     def export_report(self, file_path: str) -> None:
         """Export duplicate report to file"""
@@ -246,7 +253,6 @@ class DuplicateFinderBackend:
     
     def reset(self) -> None:
         """Reset all loaded data"""
-        client = libsql_client.create_client_sync(self.db_url)
-        client.execute("DELETE FROM entries")
-        client.execute("DELETE FROM loaded_files")
-        client.close()
+        with self._get_connection() as conn:
+            conn.execute("DELETE FROM entries")
+            conn.execute("DELETE FROM loaded_files")
